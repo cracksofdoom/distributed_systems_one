@@ -1,34 +1,23 @@
-import java.util.*;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
-public class History {
+/** Retains the most recent messages for recovery after packet loss. */
+public final class History {
+    private static final int CAPACITY = 1024;
+    private final Map<Long, Message> messages = new LinkedHashMap<>();
 
-    private final Queue<Message> messages;
-
-    public History(){
-        messages = new LinkedList<>();
-    }
-
-    public Message[] getMessages() {
-        return messages.toArray(new Message[0]);
-    }
-
-    public void addMessage(Message message) {
-        if (messages.size() < 1024) {
-            messages.add(message);
-        }else {
-            messages.remove();
-            messages.add(message);
+    public synchronized void addMessage(Message message) {
+        messages.put(message.getLastSequence(), message);
+        if (messages.size() > CAPACITY) {
+            messages.remove(messages.keySet().iterator().next());
         }
     }
 
-    public Message findMessage(long sequenceNumber){
+    public synchronized Message findMessage(long sequenceNumber) {
+        return messages.get(sequenceNumber);
+    }
 
-        for (Message value: messages){
-            if (value.getLastSequence() == sequenceNumber){
-                return value;
-            }
-        }
-
-        return null;
+    public synchronized int size() {
+        return messages.size();
     }
 }

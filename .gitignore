@@ -1,0 +1,6 @@
+.gradle/
+.idea/
+.vscode/settings.json
+build/
+*.iml
+hs_err_pid*.log

@@ -1,113 +1,98 @@
+import java.io.IOException;
+import java.net.DatagramPacket;
 import java.net.InetAddress;
+import java.net.MulticastSocket;
 import java.rmi.RemoteException;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
-public class SequencerImpl implements Sequencer {
+/**
+ * Assigns a single global sequence to all messages sent through this server.
+ */
+public final class SequencerImpl implements Sequencer, AutoCloseable {
+    @FunctionalInterface
+    interface Publisher {
+        void publish(byte[] bytes) throws IOException;
+    }
 
-    private final Group group;
-    private final ExecutorService executorService;
-    private final Set<String> senders;
+    private final InetAddress address;
+    private final Publisher publisher;
+    private final AutoCloseable resource;
+    private final History history = new History();
+    private final Set<String> senders = new HashSet<>();
+    private long sequence;
 
-    private final History history;
+    public SequencerImpl(InetAddress address, int port) throws IOException {
+        if (!address.isMulticastAddress())
+            throw new IllegalArgumentException("Group address must be multicast");
+        MulticastSocket socket = new MulticastSocket();
+        socket.setTimeToLive(1);
+        this.address = address;
+        this.publisher = bytes -> socket.send(new DatagramPacket(bytes, bytes.length, address, port));
+        this.resource = socket;
+    }
 
-    private final Group.HeartBeater heartBeater;
-
-    public SequencerImpl(String host, Group.MsgHandler handler, Group.HeartBeater.HeartBeaterHandler heartBeaterHandler, String senderName) {
-        executorService = Executors.newSingleThreadExecutor();
-        senders = new HashSet<>();
-        history = new History();
-
-        try {
-            group = new Group(host, handler, senderName);
-            heartBeater = new Group.HeartBeater(heartBeaterHandler);
-            executorService.execute(group);
-            heartBeater.start();
-        } catch (Group.GroupException e) {
-            throw new RuntimeException(e);
-        }
+    SequencerImpl(InetAddress address, Publisher publisher) {
+        this.address = address;
+        this.publisher = publisher;
+        this.resource = () -> {
+        };
     }
 
     @Override
-    public SequencerJoinInfo join(String sender) throws RemoteException, SequencerException {
-        // join -- request for "sender" to join sequencer's multicasting service;
-        // returns an object specifying the multicast address and the first sequence number to expect
-        SequencerJoinInfo sequencerJoinInfo = null;
-
-        try {
-            if (!senders.contains(sender.toLowerCase(Locale.ROOT))) {
-                InetAddress address = group.getInetAddress();
-                sequencerJoinInfo = new SequencerJoinInfo(address, 1);
-                senders.add(sender.toLowerCase(Locale.ROOT));
-            }
-        } catch (Exception e) {
-            throw new SequencerException(e.getMessage());
-        }
-
-
-        return sequencerJoinInfo;
+    public synchronized SequencerJoinInfo join(String sender) throws SequencerException {
+        String name = normalize(sender);
+        if (!senders.add(name))
+            throw new SequencerException("Name is already in use");
+        return new SequencerJoinInfo(address, sequence + 1);
     }
 
     @Override
-    public void send(String sender, byte[] msg, long msgID, long lastSequenceReceived) throws RemoteException {
-        // send -- "sender" supplies the msg to be sent, its identifier,
-        // and the sequence number of the last received message
-
-        Message message = new Message(
-                msgID,
-                sender,
-                msg,
-                (lastSequenceReceived + 1)
-        );
-
+    public synchronized void send(String sender, byte[] msg, long msgID) throws RemoteException {
         try {
-            group.send(Message.toByteStream(message));
+            if (!senders.contains(normalize(sender)))
+                throw new IllegalArgumentException("Join before sending");
+            Message message = new Message(msgID, sender.trim(), msg, sequence + 1);
+            byte[] bytes = Message.toByteStream(message);
+            publisher.publish(bytes);
+            sequence++;
             history.addMessage(message);
         } catch (Exception e) {
-            throw new RemoteException(e.getMessage());
-        }
-
-    }
-
-    @Override
-    public void leave(String sender) throws RemoteException {
-        // leave -- tell sequencer that "sender" will no longer need its services
-
-        try {
-            if (senders.contains(sender.toLowerCase(Locale.ROOT))) {
-                group.leave();
-                executorService.shutdown();
-                senders.remove(sender.toLowerCase(Locale.ROOT));
-            }
-        } catch (Group.GroupException e) {
-            throw new RemoteException(e.getMessage());
+            throw new RemoteException("Unable to send message: " + e.getMessage(), e);
         }
     }
 
     @Override
-    public byte[] getMissing(String sender, long sequence) throws RemoteException, SequencerException {
-        // getMissing -- ask sequencer for the message whose sequence number is lost
+    public synchronized void leave(String sender) {
+        if (sender != null)
+            senders.remove(sender.trim().toLowerCase(Locale.ROOT));
+    }
 
-        Message message = history.findMessage(sequence);
-
-        if(message == null){
-            throw new SequencerException("Message not found");
-        }
-
+    @Override
+    public synchronized byte[] getMissing(String sender, long requested) throws SequencerException {
+        if (!senders.contains(normalize(sender)))
+            throw new SequencerException("Join before requesting history");
+        Message message = history.findMessage(requested);
+        if (message == null)
+            throw new SequencerException("Sequence " + requested + " is no longer available");
         try {
             return Message.toByteStream(message);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new SequencerException("Unable to encode history: " + e.getMessage());
         }
     }
 
+    private static String normalize(String sender) throws SequencerException {
+        if (sender == null || sender.isBlank()
+                || sender.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 64) {
+            throw new SequencerException("Name must be 1 to 64 UTF-8 bytes");
+        }
+        return sender.trim().toLowerCase(Locale.ROOT);
+    }
 
     @Override
-    public void heartbeat(String sender, long lastSequenceReceived) throws RemoteException {
-        // heartbeat -- we have received messages up to number "lastSequenceReceived"
-
+    public void close() throws Exception {
+        resource.close();
     }
 }

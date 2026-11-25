@@ -1,9 +1,7 @@
-import java.io.*;
+public final class SequencerException extends Exception {
+    private static final long serialVersionUID = 1L;
 
-public class SequencerException extends Exception implements Serializable
-{
-    public SequencerException(String s)
-    {
-        super(s);
+    public SequencerException(String message) {
+        super(message);
     }
 }

@@ -1,13 +1,13 @@
-import java.io.*;
-import java.net.*;
+import java.io.Serializable;
+import java.net.InetAddress;
 
-public class SequencerJoinInfo implements Serializable
-{
-    public InetAddress addr;
-    public long sequence;
+/** Multicast endpoint and first sequence a new client should display. */
+public final class SequencerJoinInfo implements Serializable {
+    private static final long serialVersionUID = 1L;
+    public final InetAddress addr;
+    public final long sequence;
 
-    public SequencerJoinInfo(InetAddress addr, long sequence)
-    {
+    public SequencerJoinInfo(InetAddress addr, long sequence) {
         this.addr = addr;
         this.sequence = sequence;
     }

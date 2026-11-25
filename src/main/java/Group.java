@@ -1,119 +1,58 @@
-import java.net.*;
-import java.util.*;
-import java.io.*;
-import java.rmi.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.MulticastSocket;
+import java.util.Objects;
+import java.util.function.Consumer;
 
-public class Group implements Runnable {
+/** Receives multicast packets until closed. */
+public final class Group implements AutoCloseable, Runnable {
+    private final MulticastSocket socket;
+    private final InetSocketAddress address;
+    private final Consumer<Message> handler;
+    private final Consumer<Exception> errorHandler;
 
-    private final MulticastSocket multicastSocket;
-    private final InetAddress inetAddress;
-    private final int PORT = 6789;
-    private final int TTL = 1;
-    private final MsgHandler handler;
-
-    private static ExecutorService executor;
-
-    public Group(String host, MsgHandler handler, String senderName) throws GroupException {
-        // contact Sequencer on "host" to join group,
-        // create MulticastSocket and thread to listen on it,
-        // perform other initialisations
-        this.handler = handler;
-
+    public Group(InetAddress group, int port, Consumer<Message> handler, Consumer<Exception> errorHandler)
+            throws IOException {
+        if (!group.isMulticastAddress())
+            throw new IllegalArgumentException("Group address must be multicast");
+        this.handler = Objects.requireNonNull(handler);
+        this.errorHandler = Objects.requireNonNull(errorHandler);
+        address = new InetSocketAddress(group, port);
+        socket = new MulticastSocket(port);
         try {
-            multicastSocket = new MulticastSocket(PORT);
-            multicastSocket.setTimeToLive(TTL);
-            inetAddress = InetAddress.getByName(host);
-            multicastSocket.joinGroup(inetAddress);
-        } catch (Exception e) {
-            throw new GroupException(e.getMessage());
-        }
-
-    }
-
-    public InetAddress getInetAddress() {
-        return multicastSocket.getInetAddress();
-    }
-
-    public void send(byte[] msg) throws GroupException {
-        // send the given message to all instances of Group using the same sequencer
-        try {
-            DatagramPacket datagramPacket = new DatagramPacket(msg, msg.length, inetAddress, PORT);
-            multicastSocket.send(datagramPacket);
-        } catch (Exception e) {
-            throw new GroupException(e.getMessage());
-        }
-    }
-
-    public void leave() throws GroupException {
-        // leave group
-        try {
-            multicastSocket.leaveGroup(inetAddress);
-            multicastSocket.disconnect();
-            multicastSocket.close();
+            socket.joinGroup(address, null);
         } catch (IOException e) {
-            throw new GroupException("Failed to leave group. Error message: " + e.getMessage());
+            socket.close();
+            throw e;
         }
     }
 
+    @Override
     public void run() {
-        byte[] messageBuffer = new byte[256];
-        // repeatedly: listen to MulticastSocket created in constructor, and on receipt
-        // of a datagram call "handle" on the instance
-        // of Group.MsgHandler which was supplied to the constructor
-
-        while(true) {
-            if(!multicastSocket.isClosed()) {
-                DatagramPacket packet = new DatagramPacket(messageBuffer, messageBuffer.length);
-                try {
-                    multicastSocket.receive(packet);
-                    handler.handle(packet.getLength(), packet.getData());
-                } catch (IOException e) {
-                    multicastSocket.close();
-                    throw new RuntimeException(e);
-                }
-            }else {
-                return;
+        byte[] buffer = new byte[Message.MAX_BODY_BYTES + 128];
+        while (!socket.isClosed()) {
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            try {
+                socket.receive(packet);
+                handler.accept(Message.fromByteStream(packet.getData(), packet.getLength()));
+            } catch (IOException e) {
+                if (!socket.isClosed())
+                    errorHandler.accept(e);
+            } catch (RuntimeException e) {
+                errorHandler.accept(e);
             }
         }
     }
 
-    public interface MsgHandler {
-        public void handle(int count, byte[] msg);
+    @Override
+    public void close() {
+        try {
+            socket.leaveGroup(address, null);
+        } catch (IOException ignored) {
+            // Closing the socket still stops the receiver.
+        }
+        socket.close();
     }
-
-    public static class GroupException extends Exception {
-        public GroupException(String s) {
-            super(s);
-        }
-    }
-
-    public static class HeartBeater extends Thread {
-
-        private final HeartBeaterHandler handler;
-        public HeartBeater(HeartBeaterHandler handler){
-            this.handler = handler;
-        }
-
-        int i = 0;
-        public void run( ){
-            while(true){
-                try {
-                    Thread.sleep(60000); // wait for 1 minute
-                    handler.handle(i);
-                } catch ( Exception e){
-                    System.out.println(e.getMessage());
-                }
-
-                i++; // increment the looping variable
-
-            }
-
-        }
-
-        public  interface HeartBeaterHandler{
-            void handle(int i);
-        }
-    }
-} 
+}
